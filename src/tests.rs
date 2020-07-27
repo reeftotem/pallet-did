@@ -1,7 +1,7 @@
-use crate::{Error, mock::*, AttributeTransaction};
-use frame_support::{assert_ok, assert_noop};
-use sp_core::{Pair};
-use codec::{Encode};
+use crate::{mock::*, AttributeTransaction, Error};
+use codec::Encode;
+use frame_support::{assert_noop, assert_ok};
+use sp_core::Pair;
 
 #[test]
 fn validate_claim() {
@@ -55,7 +55,7 @@ fn validate_delegated_claim() {
                 satoshi_public.clone(),  // owner
                 nakamoto_public.clone(), // new signer delgate
                 delegate_type.clone(),   // "Sr25519VerificationKey2018"
-                5
+                Some(5)
             ) // valid for 5 blocks
         );
 
@@ -99,7 +99,7 @@ fn add_on_chain_and_revoke_off_chain_attribute() {
             alice_public.clone(),
             name.clone(),
             value.clone(),
-            validity.clone().into()
+            Some(validity.clone().into())
         ));
 
         // Validate that the attribute contains_key and has not expired.
@@ -192,7 +192,7 @@ fn attacker_add_new_delegate_should_fail() {
                 account_key("Alice"),
                 account_key("BadBoy"),
                 vec![7, 7, 7],
-                20
+                Some(20)
             ),
             Error::<Test>::NotOwner
         );

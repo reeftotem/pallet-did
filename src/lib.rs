@@ -81,11 +81,11 @@ use codec::{Decode, Encode};
 use frame_support::{
     decl_error, decl_event, decl_module, decl_storage, dispatch::DispatchResult, ensure, StorageMap,
 };
+use frame_system::{self as system, ensure_signed};
 use sp_core::RuntimeDebug;
 use sp_io::hashing::blake2_256;
 use sp_runtime::traits::{IdentifyAccount, Member, Verify};
 use sp_std::{prelude::*, vec::Vec};
-use system::ensure_signed;
 
 #[cfg(test)]
 mod mock;
@@ -103,6 +103,8 @@ pub struct Attribute<BlockNumber, Moment> {
     pub nonce: u64,
 }
 
+pub type AttributedId<BlockNumber, Moment> = (Attribute<BlockNumber, Moment>, [u8; 32]);
+
 /// Off-chain signed transaction.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Encode, Decode, Default, RuntimeDebug)]
 pub struct AttributeTransaction<Signature, AccountId> {
@@ -114,8 +116,8 @@ pub struct AttributeTransaction<Signature, AccountId> {
     pub identity: AccountId,
 }
 
-pub trait Trait: system::Trait + timestamp::Trait {
-    type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
+pub trait Trait: frame_system::Trait + pallet_timestamp::Trait {
+    type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
     type Public: IdentifyAccount<AccountId = Self::AccountId>;
     type Signature: Verify<Signer = Self::Public> + Member + Decode + Encode;
 }
@@ -152,8 +154,8 @@ decl_module! {
             let who = ensure_signed(origin)?;
             Self::is_owner(&identity, &who)?;
 
-            let now_timestamp = <timestamp::Module<T>>::now();
-            let now_block_number = <system::Module<T>>::block_number();
+            let now_timestamp = <pallet_timestamp::Module<T>>::now();
+            let now_block_number = <frame_system::Module<T>>::block_number();
 
             if <OwnerOf<T>>::contains_key(&identity) {
                 // Update to new owner.
@@ -182,30 +184,21 @@ decl_module! {
             identity: T::AccountId,
             delegate: T::AccountId,
             delegate_type: Vec<u8>,
-            valid_for: T::BlockNumber,
+            valid_for: Option<T::BlockNumber>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::is_owner(&identity, &who)?;
-            ensure!(&who != &delegate, Error::<T>::InvalidDelegate);
-            ensure!(
-                !Self::valid_listed_delegate(&identity, &delegate_type, &delegate).is_ok(),
-                Error::<T>::InvalidDelegate
-            );
             ensure!(delegate_type.len() <= 64, Error::<T>::InvalidDelegate);
 
-            let now_timestamp = <timestamp::Module<T>>::now();
-            let now_block_number = <system::Module<T>>::block_number();
-            let validity = now_block_number + valid_for;
+            Self::create_delegate( &who, &identity, &delegate, &delegate_type, valid_for)?;
 
-            <DelegateOf<T>>::insert(
-                (&identity, &delegate_type, &delegate), &validity,
-            );
+            let now_timestamp = <pallet_timestamp::Module<T>>::now();
+            let now_block_number = <frame_system::Module<T>>::block_number();
             <UpdatedBy<T>>::insert(&identity, (who, now_block_number, now_timestamp));
+
             Self::deposit_event(RawEvent::DelegateAdded(
                 identity,
                 delegate_type,
                 delegate,
-                validity,
                 valid_for,
             ));
             Ok(())
@@ -224,12 +217,12 @@ decl_module! {
             Self::valid_listed_delegate(&identity, &delegate_type, &delegate)?;
             ensure!(delegate_type.len() <= 64, Error::<T>::InvalidDelegate);
 
-            let now_timestamp = <timestamp::Module<T>>::now();
-            let now_block_number = <system::Module<T>>::block_number();
+            let now_timestamp = <pallet_timestamp::Module<T>>::now();
+            let now_block_number = <frame_system::Module<T>>::block_number();
 
             // Update only the validity period to revoke the delegate.
             <DelegateOf<T>>::mutate(
-                (&identity, &delegate_type, &delegate), |b| *b = Some(now_block_number.clone()),
+                (&identity, &delegate_type, &delegate), |b| *b = Some(now_block_number),
             );
             <UpdatedBy<T>>::insert(&identity, (who, now_block_number, now_timestamp));
             Self::deposit_event(RawEvent::DelegateRevoked(identity, delegate_type, delegate));
@@ -244,13 +237,12 @@ decl_module! {
             identity: T::AccountId,
             name: Vec<u8>,
             value: Vec<u8>,
-            valid_for: T::BlockNumber,
+            valid_for: Option<T::BlockNumber>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::is_owner(&identity, &who)?;
             ensure!(name.len() <= 64, Error::<T>::AttributeCreationFailed);
 
-            Self::create_attribute(who, &identity, &name, &value, &valid_for)?;
+            Self::create_attribute(who, &identity, &name, &value, valid_for)?;
             Self::deposit_event(RawEvent::AttributeAdded(identity, name, valid_for));
             Ok(())
         }
@@ -260,14 +252,13 @@ decl_module! {
         #[weight = 0]
         pub fn revoke_attribute(origin, identity: T::AccountId, name: Vec<u8>) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::is_owner(&identity, &who)?;
             ensure!(name.len() <= 64, Error::<T>::AttributeRemovalFailed);
 
             Self::reset_attribute(who, &identity, &name)?;
             Self::deposit_event(RawEvent::AttributeRevoked(
                 identity,
                 name,
-                <system::Module<T>>::block_number(),
+                <frame_system::Module<T>>::block_number(),
             ));
             Ok(())
         }
@@ -279,7 +270,7 @@ decl_module! {
             Self::is_owner(&identity, &who)?;
             ensure!(name.len() <= 64, Error::<T>::AttributeRemovalFailed);
 
-            let now_block_number = <system::Module<T>>::block_number();
+            let now_block_number = <frame_system::Module<T>>::block_number();
             let result = Self::attribute_and_id(&identity, &name);
 
             match result {
@@ -289,7 +280,7 @@ decl_module! {
 
             <UpdatedBy<T>>::insert(
                 &identity,
-                (&who, &now_block_number, <timestamp::Module<T>>::now()),
+                (&who, &now_block_number, <pallet_timestamp::Module<T>>::now()),
             );
 
             Self::deposit_event(RawEvent::AttributeDeleted(identity, name, now_block_number));
@@ -320,14 +311,14 @@ decl_module! {
 decl_event!(
   pub enum Event<T>
   where
-  <T as system::Trait>::AccountId,
-  <T as system::Trait>::BlockNumber,
+  <T as frame_system::Trait>::AccountId,
+  <T as frame_system::Trait>::BlockNumber,
   <T as Trait>::Signature
   {
     OwnerChanged(AccountId, AccountId, AccountId, BlockNumber),
-    DelegateAdded(AccountId, Vec<u8>, AccountId, BlockNumber, BlockNumber),
+    DelegateAdded(AccountId, Vec<u8>, AccountId, Option<BlockNumber>),
     DelegateRevoked(AccountId, Vec<u8>, AccountId),
-    AttributeAdded(AccountId,Vec<u8>,BlockNumber),
+    AttributeAdded(AccountId,Vec<u8>, Option<BlockNumber>),
     AttributeRevoked(AccountId,Vec<u8>,BlockNumber),
     AttributeDeleted(AccountId,Vec<u8>,BlockNumber),
     AttributeTransactionExecuted(AttributeTransaction<Signature,AccountId>),
@@ -361,11 +352,10 @@ impl<T: Trait> Module<T> {
     /// Get the identity owner if set.
     /// If never changed, returns the identity as its owner.
     pub fn identity_owner(identity: &T::AccountId) -> T::AccountId {
-        let owner = match Self::owner_of(identity) {
+        match Self::owner_of(identity) {
             Some(id) => id,
             None => identity.clone(),
-        };
-        owner
+        }
     }
 
     /// Validates if a delegate belongs to an identity and it has not expired.
@@ -395,10 +385,37 @@ impl<T: Trait> Module<T> {
         );
 
         let validity = Self::delegate_of((identity, delegate_type, delegate));
-        match validity > Some(<system::Module<T>>::block_number()) {
+        match validity > Some(<frame_system::Module<T>>::block_number()) {
             true => Ok(()),
             false => Err(Error::<T>::InvalidDelegate.into()),
         }
+    }
+
+    // Creates a new delegete for an account.
+    pub fn create_delegate(
+        who: &T::AccountId,
+        identity: &T::AccountId,
+        delegate: &T::AccountId,
+        delegate_type: &Vec<u8>,
+        valid_for: Option<T::BlockNumber>,
+    ) -> DispatchResult {
+        Self::is_owner(&identity, who)?;
+        ensure!(who != delegate, Error::<T>::InvalidDelegate);
+        ensure!(
+            !Self::valid_listed_delegate(identity, delegate_type, delegate).is_ok(),
+            Error::<T>::InvalidDelegate
+        );
+
+        let now_block_number = <frame_system::Module<T>>::block_number();
+        let validity: T::BlockNumber = match valid_for {
+            Some(blocks) => now_block_number + blocks,
+            None => u32::max_value().into(),
+        };
+
+        <DelegateOf<T>>::insert(
+            (&identity, delegate_type, delegate), &validity,
+        );
+        Ok(())
     }
 
     /// Checks if a signature is valid. Used to validate off-chain transactions.
@@ -427,17 +444,22 @@ impl<T: Trait> Module<T> {
     }
 
     /// Adds a new attribute to an identity and colects the storage fee.
-    fn create_attribute(
+    pub fn create_attribute(
         who: T::AccountId,
         identity: &T::AccountId,
-        name: &Vec<u8>,
-        value: &Vec<u8>,
-        valid_for: &T::BlockNumber,
+        name: &[u8],
+        value: &[u8],
+        valid_for: Option<T::BlockNumber>,
     ) -> DispatchResult {
-        let now_timestamp = <timestamp::Module<T>>::now();
-        let now_block_number = <system::Module<T>>::block_number();
-        let mut nonce = Self::nonce_of((&identity, &name));
-        let validity = now_block_number + *valid_for;
+        Self::is_owner(&identity, &who)?;
+        let now_timestamp = <pallet_timestamp::Module<T>>::now();
+        let now_block_number = <frame_system::Module<T>>::block_number();
+        let mut nonce = Self::nonce_of((&identity, name.to_vec()));
+
+        let validity: T::BlockNumber = match valid_for {
+            Some(blocks) => now_block_number + blocks,
+            None => u32::max_value().into(),
+        };
 
         // Used for first time attribute creation
         let lookup_nonce = match &nonce {
@@ -455,19 +477,19 @@ impl<T: Trait> Module<T> {
                 value: (&value).to_vec(),
                 validity,
                 creation: now_timestamp,
-                nonce: nonce.clone(),
+                nonce,
             };
 
             // Prevent panic overflow
             nonce = nonce.checked_add(1).ok_or(Error::<T>::Overflow)?;
             <AttributeOf<T>>::insert((&identity, &id), new_attribute);
-            <AttributeNonce<T>>::mutate((&identity, &name), |n| *n = nonce);
+            <AttributeNonce<T>>::mutate((&identity, name.to_vec()), |n| *n = nonce);
             <UpdatedBy<T>>::insert(
                 identity,
                 (
                     who,
-                    <system::Module<T>>::block_number(),
-                    <timestamp::Module<T>>::now(),
+                    <frame_system::Module<T>>::block_number(),
+                    <pallet_timestamp::Module<T>>::now(),
                 ),
             );
             Ok(())
@@ -475,16 +497,13 @@ impl<T: Trait> Module<T> {
     }
 
     /// Updates the attribute validity to make it expire and invalid.
-    fn reset_attribute(
-        who: T::AccountId,
-        identity: &T::AccountId,
-        name: &Vec<u8>,
-    ) -> DispatchResult {
+    pub fn reset_attribute(who: T::AccountId, identity: &T::AccountId, name: &[u8]) -> DispatchResult {
+        Self::is_owner(&identity, &who)?;
         // If the attribute contains_key, the latest valid block is set to the current block.
         let result = Self::attribute_and_id(identity, name);
         match result {
             Some((mut attribute, id)) => {
-                attribute.validity = <system::Module<T>>::block_number();
+                attribute.validity = <frame_system::Module<T>>::block_number();
                 <AttributeOf<T>>::mutate((&identity, id), |a| *a = attribute);
             }
             None => return Err(Error::<T>::AttributeResetFailed.into()),
@@ -495,19 +514,15 @@ impl<T: Trait> Module<T> {
             identity,
             (
                 who,
-                <system::Module<T>>::block_number(),
-                <timestamp::Module<T>>::now(),
+                <frame_system::Module<T>>::block_number(),
+                <pallet_timestamp::Module<T>>::now(),
             ),
         );
         Ok(())
     }
 
     /// Validates if an attribute belongs to an identity and it has not expired.
-    pub fn valid_attribute(
-        identity: &T::AccountId,
-        name: &Vec<u8>,
-        value: &Vec<u8>,
-    ) -> DispatchResult {
+    pub fn valid_attribute(identity: &T::AccountId, name: &[u8], value: &[u8]) -> DispatchResult {
         ensure!(name.len() <= 64, Error::<T>::InvalidAttribute);
         let result = Self::attribute_and_id(identity, name);
 
@@ -516,7 +531,9 @@ impl<T: Trait> Module<T> {
             None => return Err(Error::<T>::InvalidAttribute.into()),
         };
 
-        if (attr.validity > (<system::Module<T>>::block_number())) && (attr.value == *value) {
+        if (attr.validity > (<frame_system::Module<T>>::block_number()))
+            && (attr.value == value.to_vec())
+        {
             Ok(())
         } else {
             Err(Error::<T>::InvalidAttribute.into())
@@ -527,9 +544,9 @@ impl<T: Trait> Module<T> {
     /// Uses a nonce to keep track of identifiers making them unique after attributes deletion.
     pub fn attribute_and_id(
         identity: &T::AccountId,
-        name: &Vec<u8>,
-    ) -> Option<(Attribute<T::BlockNumber, T::Moment>, [u8; 32])> {
-        let nonce = Self::nonce_of((&identity, &name));
+        name: &[u8],
+    ) -> Option<AttributedId<T::BlockNumber, T::Moment>> {
+        let nonce = Self::nonce_of((&identity, name.to_vec()));
 
         // Used for first time attribute creation
         let lookup_nonce = match nonce {
@@ -562,9 +579,9 @@ impl<T: Trait> Module<T> {
             &transaction.signer,
         )?;
         Self::is_owner(&transaction.identity, &transaction.signer)?;
-        ensure!(&transaction.name.len() <= &64, Error::<T>::BadTransaction);
+        ensure!(transaction.name.len() <= 64, Error::<T>::BadTransaction);
 
-        let now_block_number = <system::Module<T>>::block_number();
+        let now_block_number = <frame_system::Module<T>>::block_number();
         let validity = now_block_number + transaction.validity.into();
 
         // If validity was set to 0 in the transaction,
@@ -575,7 +592,7 @@ impl<T: Trait> Module<T> {
                 &transaction.identity,
                 &transaction.name,
                 &transaction.value,
-                &transaction.validity.into(),
+                Some(transaction.validity.into()),
             )?;
         } else {
             Self::reset_attribute(who, &transaction.identity, &transaction.name)?;
